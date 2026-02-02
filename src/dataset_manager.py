@@ -205,6 +205,7 @@ class DatasetManagerApp:
         self._dataset_dir = None
         self._video_paths = []
         self._metadata = {}
+        self._export_selected = set()
         self._inline_entry = None
         self._inline_iid = None
         self._inline_col = None
@@ -223,6 +224,7 @@ class DatasetManagerApp:
         br.grid(row=1, column=1, sticky="w", padx=5, pady=2)
         ttk.Button(br, text="Edit", command=self._on_edit).pack(side="left", padx=2)
         ttk.Button(br, text="Save", command=self._on_save).pack(side="left", padx=2)
+        ttk.Button(br, text="Export", command=self._on_export).pack(side="left", padx=2)
         content = ttk.Frame(self.root, padding=5)
         content.grid(row=1, column=0, sticky="nsew")
         self.root.rowconfigure(1, weight=1)
@@ -233,12 +235,14 @@ class DatasetManagerApp:
         table_f.grid(row=0, column=0, sticky="nsew")
         table_f.columnconfigure(0, weight=1)
         table_f.rowconfigure(0, weight=1)
-        cols = ("filename", "path", "tags", "notes")
+        cols = ("check", "filename", "path", "tags", "notes")
         self._tree = ttk.Treeview(table_f, columns=cols, show="headings", selectmode="browse", height=20)
+        self._tree.heading("check", text="")
         self._tree.heading("filename", text="Filename")
         self._tree.heading("path", text="Path (relative to selected folder)")
         self._tree.heading("tags", text="Tags (, or ; or space separated)")
         self._tree.heading("notes", text="Notes")
+        self._tree.column("check", width=36)
         self._tree.column("filename", width=120)
         self._tree.column("path", width=280)
         self._tree.column("tags", width=150)
@@ -290,6 +294,7 @@ class DatasetManagerApp:
             self._preview_label.config(text="Select a video.")
             self._clear_preview_image()
             return
+        self._export_selected.clear()
         self._video_paths = sorted(scan_videos(self._dataset_dir))
         self._metadata = merge_with_video_list(self._video_paths, load_metadata(self._dataset_dir))
         for p in self._video_paths:
@@ -299,7 +304,8 @@ class DatasetManagerApp:
             except ValueError:
                 rp = p
             m = self._metadata.get(key, {"tags": "", "notes": ""})
-            self._tree.insert("", "end", values=(p.name, str(rp), m.get("tags", ""), m.get("notes", "")), iid=key)
+            check_mark = "\u2611" if key in self._export_selected else "\u2610"
+            self._tree.insert("", "end", values=(check_mark, p.name, str(rp), m.get("tags", ""), m.get("notes", "")), iid=key)
         self._status.config(text="%d video(s) (including subfolders)." % len(self._video_paths))
         tc = count_tags_in_metadata(self._metadata)
         if tc:
@@ -373,7 +379,7 @@ class DatasetManagerApp:
         if self._tree.identify_region(e.x, e.y) != "cell":
             self._on_edit()
             return
-        if self._tree.identify_column(e.x) == "#1":
+        if self._tree.identify_column(e.x) == "#2":
             iid = self._tree.identify_row(e.y)
             if iid:
                 try:
@@ -391,10 +397,21 @@ class DatasetManagerApp:
             return
         iid = self._tree.identify_row(e.y)
         col = self._tree.identify_column(e.x)
-        if col == "#3":
-            self._start_inline_edit(iid, 2)
-        elif col == "#4":
+        if col == "#1":
+            if iid:
+                vals = list(self._tree.item(iid)["values"])
+                if iid in self._export_selected:
+                    self._export_selected.discard(iid)
+                    vals[0] = "\u2610"
+                else:
+                    self._export_selected.add(iid)
+                    vals[0] = "\u2611"
+                self._tree.item(iid, values=vals)
+            return
+        if col == "#4":
             self._start_inline_edit(iid, 3)
+        elif col == "#5":
+            self._start_inline_edit(iid, 4)
 
     def _start_inline_edit(self, iid: str, col_index: int):
         bbox = self._tree.bbox(iid, col_index)
@@ -429,7 +446,7 @@ class DatasetManagerApp:
         self._inline_entry.destroy()
         self._inline_entry = self._inline_iid = self._inline_col = None
         self._metadata.setdefault(iid, {"tags": "", "notes": ""})
-        if col == 2:
+        if col == 3:
             val = normalize_tags(val)
             self._metadata[iid]["tags"] = val
         else:
@@ -453,12 +470,12 @@ class DatasetManagerApp:
             return
         iid = sel[0]
         it = self._tree.item(iid)
-        tags, notes = it["values"][2], it["values"][3]
+        tags, notes = it["values"][3], it["values"][4]
         dlg = EditDialog(self.root, tags=tags, notes=notes, title="Edit tags and notes")
         res = dlg.run()
         if res is not None:
             self._metadata[iid] = res
-            self._tree.item(iid, values=(it["values"][0], it["values"][1], res["tags"], res["notes"]))
+            self._tree.item(iid, values=(it["values"][0], it["values"][1], it["values"][2], res["tags"], res["notes"]))
 
     def _on_save(self):
         if not self._dataset_dir:
@@ -483,6 +500,25 @@ class DatasetManagerApp:
             self._status_untagged.config(text="Files without tags: %d" % n)
         except OSError as ex:
             messagebox.showerror("Error", "Failed to save: %s" % ex)
+
+    def _on_export(self):
+        if not self._export_selected:
+            messagebox.showinfo("Info", "No files selected for export.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export selected file paths",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for p in sorted(self._export_selected):
+                    f.write(p + "\n")
+            messagebox.showinfo("Info", "Exported %d path(s) to %s" % (len(self._export_selected), path))
+        except OSError as ex:
+            messagebox.showerror("Error", "Failed to export: %s" % ex)
 
     def run(self):
         self.root.mainloop()
