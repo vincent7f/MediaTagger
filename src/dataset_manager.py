@@ -126,6 +126,14 @@ def count_tags_in_metadata(metadata: Dict[str, Dict[str, str]]) -> Counter:
     return c
 
 
+def get_all_tags(metadata: Dict[str, Dict[str, str]]) -> List[str]:
+    tags = set()
+    for entry in metadata.values():
+        for tag in (t.strip() for t in (entry.get("tags") or "").split(";") if t.strip()):
+            tags.add(tag)
+    return sorted(tags)
+
+
 def scan_videos(dataset_dir: Path) -> List[Path]:
     if not dataset_dir.is_dir():
         return []
@@ -206,6 +214,7 @@ class DatasetManagerApp:
         self._video_paths = []
         self._metadata = {}
         self._export_selected = set()
+        self._tag_filter = None
         self._inline_entry = None
         self._inline_iid = None
         self._inline_col = None
@@ -225,6 +234,15 @@ class DatasetManagerApp:
         ttk.Button(br, text="Edit", command=self._on_edit).pack(side="left", padx=2)
         ttk.Button(br, text="Save", command=self._on_save).pack(side="left", padx=2)
         ttk.Button(br, text="Export", command=self._on_export).pack(side="left", padx=2)
+        filter_f = ttk.Frame(top)
+        filter_f.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=2)
+        filter_f.columnconfigure(1, weight=1)
+        ttk.Label(filter_f, text="Filter by tag:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        self._filter_var = tk.StringVar()
+        self._filter_entry = ttk.Entry(filter_f, textvariable=self._filter_var, width=40)
+        self._filter_entry.grid(row=0, column=1, sticky="ew", padx=0)
+        self._filter_entry.bind("<Return>", lambda e: self._apply_tag_filter())
+        self._filter_entry.bind("<FocusIn>", lambda e: self._on_filter_focus_in())
         content = ttk.Frame(self.root, padding=5)
         content.grid(row=1, column=0, sticky="nsew")
         self.root.rowconfigure(1, weight=1)
@@ -297,16 +315,38 @@ class DatasetManagerApp:
         self._export_selected.clear()
         self._video_paths = sorted(scan_videos(self._dataset_dir))
         self._metadata = merge_with_video_list(self._video_paths, load_metadata(self._dataset_dir))
+        self._populate_tree()
+        self._update_status_after_load()
+        self._start_preview_generation()
+
+    def _populate_tree(self):
+        for i in self._tree.get_children():
+            self._tree.delete(i)
+        if not self._video_paths:
+            return
+        keyword = (self._tag_filter or "").strip().lower()
         for p in self._video_paths:
             key = str(p.resolve())
+            m = self._metadata.get(key, {"tags": "", "notes": ""})
+            if keyword:
+                tags_str = (m.get("tags") or "").lower()
+                if keyword not in tags_str:
+                    continue
             try:
                 rp = p.relative_to(self._dataset_dir)
             except ValueError:
                 rp = p
-            m = self._metadata.get(key, {"tags": "", "notes": ""})
             check_mark = "\u2611" if key in self._export_selected else "\u2610"
             self._tree.insert("", "end", values=(check_mark, p.name, str(rp), m.get("tags", ""), m.get("notes", "")), iid=key)
-        self._status.config(text="%d video(s) (including subfolders)." % len(self._video_paths))
+        if self._tag_filter and (self._tag_filter or "").strip():
+            shown = len(self._tree.get_children())
+            self._status.config(text="%d video(s) shown (filtered by tag, %d total)." % (shown, len(self._video_paths)))
+        else:
+            self._status.config(text="%d video(s) (including subfolders)." % len(self._video_paths))
+
+    def _update_status_after_load(self):
+        if not self._metadata:
+            return
         tc = count_tags_in_metadata(self._metadata)
         if tc:
             self._status_tags.config(text="Tag counts: " + ", ".join("%s (%d)" % (t, c) for t, c in sorted(tc.items(), key=lambda x: (-x[1], x[0]))))
@@ -314,7 +354,11 @@ class DatasetManagerApp:
             self._status_tags.config(text="Tag counts: (none)")
         n = sum(1 for v in self._metadata.values() if not (v.get("tags") or "").strip())
         self._status_untagged.config(text="Files without tags: %d" % n)
-        self._start_preview_generation()
+        if not (self._tag_filter and (self._tag_filter or "").strip()):
+            self._status.config(text="%d video(s) (including subfolders)." % len(self._video_paths))
+        else:
+            shown = len(self._tree.get_children())
+            self._status.config(text="%d video(s) shown (filtered by tag, %d total)." % (shown, len(self._video_paths)))
 
     def _on_selection_change(self):
         sel = self._tree.selection()
@@ -368,6 +412,54 @@ class DatasetManagerApp:
         if new_path.resolve() == get_preview_path(self._dataset_dir, Path(iid)).resolve():
             self._show_preview_image(str(new_path))
             self._preview_label.config(text=Path(iid).name)
+
+    def _apply_tag_filter(self):
+        raw = self._filter_var.get().strip()
+        self._tag_filter = raw if raw else None
+        if not self._video_paths:
+            return
+        self._populate_tree()
+
+    def _on_filter_focus_in(self):
+        if self._filter_var.get().strip():
+            return
+        if not self._metadata:
+            return
+        tags = get_all_tags(self._metadata)
+        if not tags:
+            return
+        self._show_tag_picker_popup(tags)
+
+    def _show_tag_picker_popup(self, tags: List[str]):
+        pop = tk.Toplevel(self.root)
+        pop.title("Select tag to filter")
+        pop.transient(self.root)
+        pop.geometry("+%d+%d" % (self._filter_entry.winfo_rootx(), self._filter_entry.winfo_rooty() + self._filter_entry.winfo_height() + 2))
+        lb = tk.Listbox(pop, height=min(15, len(tags)), width=40, font=("TkDefaultFont", 10))
+        lb.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(pop, orient="vertical", command=lb.yview)
+        sb.pack(side="right", fill="y")
+        lb.configure(yscrollcommand=sb.set)
+        for t in tags:
+            lb.insert("end", t)
+
+        def on_select(ev=None):
+            sel = lb.curselection()
+            if sel:
+                self._filter_var.set(lb.get(sel[0]))
+                pop.destroy()
+
+        def on_cancel(ev=None):
+            pop.destroy()
+
+        lb.bind("<Double-1>", on_select)
+        lb.bind("<Return>", on_select)
+        pop.bind("<Escape>", on_cancel)
+        pop.protocol("WM_DELETE_WINDOW", on_cancel)
+        lb.focus_set()
+        if tags:
+            lb.selection_set(0)
+            lb.activate(0)
 
     def _on_refresh(self):
         if self._dataset_dir:
