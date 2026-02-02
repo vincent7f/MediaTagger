@@ -247,6 +247,7 @@ class DatasetManagerApp:
         ttk.Button(br, text="Edit", command=self._on_edit).pack(side="left", padx=2)
         ttk.Button(br, text="Save", command=self._on_save).pack(side="left", padx=2)
         ttk.Button(br, text="Export", command=self._on_export).pack(side="left", padx=2)
+        ttk.Button(br, text="Delete", command=self._on_delete).pack(side="left", padx=2)
         filter_f = ttk.Frame(top)
         filter_f.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=2)
         filter_f.columnconfigure(1, weight=1)
@@ -267,7 +268,7 @@ class DatasetManagerApp:
         table_f.columnconfigure(0, weight=1)
         table_f.rowconfigure(0, weight=1)
         cols = ("check", "filename", "path", "tags", "notes")
-        self._tree = ttk.Treeview(table_f, columns=cols, show="headings", selectmode="browse", height=20)
+        self._tree = ttk.Treeview(table_f, columns=cols, show="headings", selectmode="extended", height=20)
         self._tree.heading("check", text="")
         self._tree.heading("filename", text="Filename")
         self._tree.heading("path", text="Path (relative to selected folder)")
@@ -624,6 +625,32 @@ class DatasetManagerApp:
             messagebox.showinfo("Info", "Exported %d path(s) to %s" % (len(self._export_selected), path))
         except OSError as ex:
             messagebox.showerror("Error", "Failed to export: %s" % ex)
+
+    def _on_delete(self):
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Select at least one file to delete.")
+            return
+        n = len(sel)
+        if not messagebox.askyesno("Confirm", "Delete %d file(s)? This cannot be undone." % n):
+            return
+        failed = []
+        for iid in sel:
+            p = Path(iid)
+            try:
+                if p.is_file():
+                    p.unlink()
+            except OSError as ex:
+                failed.append("%s: %s" % (p.name, ex))
+            self._metadata.pop(iid, None)
+            self._export_selected.discard(iid)
+        self._video_paths = [p for p in self._video_paths if str(p.resolve()) not in sel]
+        self._populate_tree()
+        self._update_status_after_load()
+        if failed:
+            messagebox.showerror("Error", "Failed to delete:\n" + "\n".join(failed))
+        else:
+            self._status.config(text="Deleted %d file(s)." % n)
 
     def run(self):
         self.root.mainloop()
