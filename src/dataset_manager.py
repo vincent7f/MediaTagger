@@ -93,6 +93,8 @@ def merge_with_video_list(
 
 # --- app ---
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".flv", ".webm"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
 PREVIEWS_DIR = "previews"
 PREVIEW_EXT = ".jpg"
 PREVIEW_MAX_SIZE = (320, 240)
@@ -134,37 +136,48 @@ def get_all_tags(metadata: Dict[str, Dict[str, str]]) -> List[str]:
     return sorted(tags)
 
 
-def scan_videos(dataset_dir: Path) -> List[Path]:
+def scan_media(dataset_dir: Path) -> List[Path]:
     if not dataset_dir.is_dir():
         return []
-    return [f for f in dataset_dir.rglob("*") if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS]
+    return [f for f in dataset_dir.rglob("*") if f.is_file() and f.suffix.lower() in MEDIA_EXTENSIONS]
 
 
-def get_preview_path(dataset_dir: Path, video_path: Path) -> Path:
+def get_preview_path(dataset_dir: Path, file_path: Path) -> Path:
     try:
-        rel = video_path.resolve().relative_to(dataset_dir.resolve())
+        rel = file_path.resolve().relative_to(dataset_dir.resolve())
     except ValueError:
-        rel = video_path.name
+        rel = file_path.name
     return dataset_dir / DATA_DIR_NAME / PREVIEWS_DIR / (hashlib.md5(str(rel).encode("utf-8")).hexdigest() + PREVIEW_EXT)
 
 
-def generate_one_preview(video_path: Path, preview_path: Path) -> bool:
-    if cv2 is None:
-        return False
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return False
-    cap.set(cv2.CAP_PROP_POS_MSEC, 500)
-    ret, frame = cap.read()
-    if not ret:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+def generate_one_preview(file_path: Path, preview_path: Path) -> bool:
+    suffix = file_path.suffix.lower()
+    if suffix in IMAGE_EXTENSIONS and Image is not None:
+        try:
+            preview_path.parent.mkdir(parents=True, exist_ok=True)
+            img = Image.open(file_path)
+            img = img.convert("RGB")
+            img.thumbnail(PREVIEW_MAX_SIZE, getattr(Image, "LANCZOS", Image.BICUBIC))
+            img.save(preview_path, "JPEG")
+            return True
+        except Exception:
+            return False
+    if suffix in VIDEO_EXTENSIONS and cv2 is not None:
+        cap = cv2.VideoCapture(str(file_path))
+        if not cap.isOpened():
+            return False
+        cap.set(cv2.CAP_PROP_POS_MSEC, 500)
         ret, frame = cap.read()
-    cap.release()
-    if not ret or frame is None:
-        return False
-    preview_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(preview_path), frame)
-    return True
+        if not ret:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = cap.read()
+        cap.release()
+        if not ret or frame is None:
+            return False
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(preview_path), frame)
+        return True
+    return False
 
 
 class EditDialog:
@@ -276,7 +289,7 @@ class DatasetManagerApp:
         content.columnconfigure(1, weight=0, minsize=PREVIEW_MAX_SIZE[0] + 20)
         prev_f.columnconfigure(0, weight=1)
         prev_f.rowconfigure(1, weight=1)
-        self._preview_label = ttk.Label(prev_f, text="Select a video.", anchor="center")
+        self._preview_label = ttk.Label(prev_f, text="Select a file.", anchor="center")
         self._preview_label.grid(row=0, column=0, pady=(0, 5))
         self._preview_image_label = tk.Label(prev_f, text="", bg="#e0e0e0", width=PREVIEW_MAX_SIZE[0] // 8, height=PREVIEW_MAX_SIZE[1] // 8)
         self._preview_image_label.grid(row=1, column=0, sticky="nsew")
@@ -288,7 +301,7 @@ class DatasetManagerApp:
         for r in range(4):
             status_f.rowconfigure(r, minsize=20)
         ttk.Label(status_f, text="Tags: semicolon, comma or space separated. Stored as semicolon-separated.", font=("TkDefaultFont", 8)).grid(row=0, column=0, sticky="w", padx=0, pady=1)
-        self._status = ttk.Label(status_f, text="Select a directory to list videos.")
+        self._status = ttk.Label(status_f, text="Select a directory to list videos and images.")
         self._status.grid(row=1, column=0, sticky="w", padx=0, pady=1)
         self._status_tags = ttk.Label(status_f, text="", font=("TkDefaultFont", 8), wraplength=700)
         self._status_tags.grid(row=2, column=0, sticky="w", padx=0, pady=1)
@@ -306,14 +319,14 @@ class DatasetManagerApp:
         for i in self._tree.get_children():
             self._tree.delete(i)
         if not self._dataset_dir or not self._dataset_dir.is_dir():
-            self._status.config(text="Select a directory to list videos.")
+            self._status.config(text="Select a directory to list videos and images.")
             self._status_tags.config(text="")
             self._status_untagged.config(text="")
-            self._preview_label.config(text="Select a video.")
+            self._preview_label.config(text="Select a file.")
             self._clear_preview_image()
             return
         self._export_selected.clear()
-        self._video_paths = sorted(scan_videos(self._dataset_dir))
+        self._video_paths = sorted(scan_media(self._dataset_dir))
         self._metadata = merge_with_video_list(self._video_paths, load_metadata(self._dataset_dir))
         self._populate_tree()
         self._update_status_after_load()
@@ -340,9 +353,9 @@ class DatasetManagerApp:
             self._tree.insert("", "end", values=(check_mark, p.name, str(rp), m.get("tags", ""), m.get("notes", "")), iid=key)
         if self._tag_filter and (self._tag_filter or "").strip():
             shown = len(self._tree.get_children())
-            self._status.config(text="%d video(s) shown (filtered by tag, %d total)." % (shown, len(self._video_paths)))
+            self._status.config(text="%d file(s) shown (filtered by tag, %d total)." % (shown, len(self._video_paths)))
         else:
-            self._status.config(text="%d video(s) (including subfolders)." % len(self._video_paths))
+            self._status.config(text="%d file(s) (videos and images, including subfolders)." % len(self._video_paths))
 
     def _update_status_after_load(self):
         if not self._metadata:
@@ -355,15 +368,15 @@ class DatasetManagerApp:
         n = sum(1 for v in self._metadata.values() if not (v.get("tags") or "").strip())
         self._status_untagged.config(text="Files without tags: %d" % n)
         if not (self._tag_filter and (self._tag_filter or "").strip()):
-            self._status.config(text="%d video(s) (including subfolders)." % len(self._video_paths))
+            self._status.config(text="%d file(s) (videos and images, including subfolders)." % len(self._video_paths))
         else:
             shown = len(self._tree.get_children())
-            self._status.config(text="%d video(s) shown (filtered by tag, %d total)." % (shown, len(self._video_paths)))
+            self._status.config(text="%d file(s) shown (filtered by tag, %d total)." % (shown, len(self._video_paths)))
 
     def _on_selection_change(self):
         sel = self._tree.selection()
         if not sel or not self._dataset_dir:
-            self._preview_label.config(text="Select a video.")
+            self._preview_label.config(text="Select a file.")
             self._clear_preview_image()
             return
         iid = sel[0]
@@ -392,7 +405,7 @@ class DatasetManagerApp:
         self._preview_image_label.config(image="", text="", bg="#e0e0e0")
 
     def _start_preview_generation(self):
-        if not self._dataset_dir or not self._video_paths or cv2 is None:
+        if not self._dataset_dir or not self._video_paths or (cv2 is None and Image is None):
             return
         dd, vps = self._dataset_dir, list(self._video_paths)
         def gen():
