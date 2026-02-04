@@ -11,7 +11,7 @@ DIST_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$DIST_ROOT" || exit 1
 
 # Run the Python script
-python src/run_dataset_manager.py
+venv/bin/python src/run_dataset_manager.py
 
 # Check exit status and show error message if failed
 if [ $? -ne 0 ]; then
